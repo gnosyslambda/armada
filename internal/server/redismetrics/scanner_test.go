@@ -13,34 +13,6 @@ import (
 	"github.com/armadaproject/armada/internal/common/armadacontext"
 )
 
-// mockRedisClient is a minimal mock for context-cancellation testing only.
-type mockRedisClient struct {
-	scanResults map[uint64][]string
-}
-
-func (m *mockRedisClient) Scan(ctx context.Context, cursor uint64, match string, count int64) *redis.ScanCmd {
-	cmd := &redis.ScanCmd{}
-	keys := m.scanResults[cursor]
-	if keys == nil {
-		keys = []string{}
-	}
-	cmd.SetVal(keys, 0)
-	return cmd
-}
-
-// Stub implementations to satisfy RedisClient interface - unused by context-cancellation tests
-func (m *mockRedisClient) XInfoStream(ctx context.Context, key string) *redis.XInfoStreamCmd {
-	return &redis.XInfoStreamCmd{}
-}
-
-func (m *mockRedisClient) MemoryUsage(ctx context.Context, key string, samples ...int) *redis.IntCmd {
-	return &redis.IntCmd{}
-}
-
-func (m *mockRedisClient) Pipeline() redis.Pipeliner {
-	return &redis.Pipeline{}
-}
-
 // TestScanAll_SingleKey tests scanning with a single stream key using real Redis.
 func TestScanAll_SingleKey(t *testing.T) {
 	withRedisClient(t, func(client redis.UniversalClient) {
@@ -124,24 +96,25 @@ func TestScanAll_MultipleBatches(t *testing.T) {
 
 // TestScanAll_ContextCancelled tests that scanning respects context cancellation.
 func TestScanAll_ContextCancelled(t *testing.T) {
-	client := &mockRedisClient{
-		scanResults: map[uint64][]string{
-			0: {"Events:myqueue:myjobset"},
-		},
-	}
+	withRedisClient(t, func(client redis.UniversalClient) {
+		seedCtx, seedCancel := armadacontext.WithTimeout(armadacontext.Background(), 30*time.Second)
+		defer seedCancel()
 
-	config := Config{
-		ScanBatchSize:     10,
-		PipelineBatchSize: 5,
-		InterBatchDelay:   100 * time.Millisecond,
-	}
+		seedRedisStream(t, client, seedCtx, "myqueue", "myjobset", 100)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+		config := Config{
+			ScanBatchSize:     10,
+			PipelineBatchSize: 5,
+			InterBatchDelay:   100 * time.Millisecond,
+		}
 
-	scanner := NewScanner(client, config)
-	_, err := scanner.ScanAll(ctx)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
 
-	require.Error(t, err)
-	assert.Equal(t, context.Canceled, err)
+		scanner := NewScanner(client, config)
+		_, err := scanner.ScanAll(ctx)
+
+		require.Error(t, err)
+		assert.Equal(t, context.Canceled, err)
+	})
 }
